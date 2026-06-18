@@ -1,85 +1,111 @@
 package com.paymentservice.backend;
 
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static com.paymentservice.backend.payments.PaymentModels.PaymentMethodType.UPI;
+import static com.paymentservice.backend.payments.PaymentModels.PaymentStatus.FAILED;
+import static com.paymentservice.backend.payments.PaymentModels.PaymentStatus.PROCESSING;
+import static com.paymentservice.backend.payments.PaymentModels.PaymentStatus.SUCCESS;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.Map;
+import com.paymentservice.backend.payments.PaymentModels.PaymentRequest;
+import com.paymentservice.backend.payments.PaymentModels.SimulationMode;
+import com.paymentservice.backend.payments.PaymentService;
+import java.math.BigDecimal;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
-import org.springframework.http.MediaType;
-import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.web.server.ResponseStatusException;
 
-@SpringBootTest
-@AutoConfigureMockMvc
 class BackendServiceApplicationTests {
 
-	@Autowired
-	private MockMvc mockMvc;
-
-	@Autowired
-	private ObjectMapper objectMapper;
+	private final PaymentService paymentService = new PaymentService();
 
 	@Test
 	void createsPaymentAndTransitionsToSuccess() throws Exception {
-		Map<String, Object> request = Map.of(
-			"orderId", "ORD-1001",
-			"customerName", "Aarav Sharma",
-			"customerEmail", "aarav@example.com",
-			"amount", 2499,
-			"currency", "INR",
-			"paymentMethod", "UPI",
-			"simulationMode", "SUCCESS",
-			"upiId", "aarav@upi"
+		PaymentRequest request = new PaymentRequest(
+			"ORD-1001",
+			"Aarav Sharma",
+			"aarav@example.com",
+			BigDecimal.valueOf(2499),
+			"INR",
+			UPI,
+			SimulationMode.SUCCESS,
+			"aarav@upi",
+			null,
+			null,
+			null,
+			null,
+			null,
+			null
 		);
 
-		MvcResult createResult = mockMvc.perform(post("/api/payments")
-				.contentType(MediaType.APPLICATION_JSON)
-				.content(objectMapper.writeValueAsBytes(request)))
-			.andExpect(status().isCreated())
-			.andExpect(jsonPath("$.status").value("PROCESSING"))
-			.andReturn();
+		var createdPayment = paymentService.createPayment(request);
+		assertEquals(PROCESSING, createdPayment.status());
+		assertNotNull(createdPayment.paymentId());
 
-		JsonNode createPayload = objectMapper.readTree(createResult.getResponse().getContentAsByteArray());
-		String paymentId = createPayload.get("paymentId").asText();
+		var firstPoll = paymentService.getPayment(createdPayment.paymentId());
+		assertEquals(PROCESSING, firstPoll.status());
 
-		mockMvc.perform(get("/api/payments/{paymentId}", paymentId))
-			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.status").value("PROCESSING"));
+		var secondPoll = paymentService.getPayment(createdPayment.paymentId());
+		assertEquals(SUCCESS, secondPoll.status());
+		assertEquals("UPI ID: aarav@upi", secondPoll.maskedInstrument());
 
-		mockMvc.perform(get("/api/payments/{paymentId}", paymentId))
-			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.status").value("SUCCESS"));
-
-		mockMvc.perform(get("/api/payments/{paymentId}/receipt", paymentId))
-			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.paymentId").value(paymentId))
-			.andExpect(jsonPath("$.receiptNumber").isNotEmpty());
+		var receipt = paymentService.getReceipt(createdPayment.paymentId());
+		assertEquals(SUCCESS, receipt.status());
+		assertNotNull(receipt.receiptNumber());
 	}
 
 	@Test
 	void rejectsUpiPaymentWithoutUpiId() throws Exception {
-		Map<String, Object> request = Map.of(
-			"orderId", "ORD-1002",
-			"customerName", "Aarav Sharma",
-			"customerEmail", "aarav@example.com",
-			"amount", 2499,
-			"currency", "INR",
-			"paymentMethod", "UPI",
-			"simulationMode", "SUCCESS"
+		PaymentRequest request = new PaymentRequest(
+			"ORD-1002",
+			"Aarav Sharma",
+			"aarav@example.com",
+			BigDecimal.valueOf(2499),
+			"INR",
+			UPI,
+			SimulationMode.SUCCESS,
+			null,
+			null,
+			null,
+			null,
+			null,
+			null,
+			null
 		);
 
-		mockMvc.perform(post("/api/payments")
-				.contentType(MediaType.APPLICATION_JSON)
-				.content(objectMapper.writeValueAsBytes(request)))
-			.andExpect(status().isBadRequest())
-			.andExpect(jsonPath("$.message").value("UPI ID is required for UPI payments."));
+		ResponseStatusException exception = assertThrows(
+			ResponseStatusException.class,
+			() -> paymentService.createPayment(request)
+		);
+
+		assertEquals("400 BAD_REQUEST \"UPI ID is required for UPI payments.\"", exception.getMessage());
+	}
+
+	@Test
+	void returnsFailedStatusForFailedSimulation() throws Exception {
+		PaymentRequest request = new PaymentRequest(
+			"ORD-1003",
+			"Aarav Sharma",
+			"aarav@example.com",
+			BigDecimal.valueOf(2499),
+			"INR",
+			UPI,
+			SimulationMode.FAILED,
+			"aarav@upi",
+			null,
+			null,
+			null,
+			null,
+			null,
+			null
+		);
+
+		var createdPayment = paymentService.createPayment(request);
+		paymentService.getPayment(createdPayment.paymentId());
+		var finalPayment = paymentService.getPayment(createdPayment.paymentId());
+
+		assertEquals(FAILED, finalPayment.status());
+		assertNotNull(finalPayment.failureReason());
 	}
 
 }

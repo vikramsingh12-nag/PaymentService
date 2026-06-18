@@ -27,7 +27,7 @@ public class ApiExceptionHandler {
 			.getFieldErrors()
 			.stream()
 			.map(FieldError::getDefaultMessage)
-			collect(Collectors.joining(" "));
+			.collect(Collectors.joining(" "));
 
 		Map<String, String> body = new LinkedHashMap<>();
 		body.put("message", message.isBlank() ? "Validation failed." : message);
